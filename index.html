@@ -1,0 +1,208 @@
+"""Limpieza de la base del CARI: genera CARI_limpio.xlsx a partir del Excel original."""
+import re, unicodedata
+import numpy as np
+import pandas as pd
+
+df_crudo = pd.read_excel("Tp_2_Programacion.xlsx")
+df = df_crudo.copy()
+
+def normalizar(texto):
+    """Mayúsculas, sin tildes, sin saltos de línea ni _x000D_ y sin espacios de más."""
+    if pd.isna(texto):
+        return texto
+    texto = str(texto).replace("_x000D_", " ").upper()
+    texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", texto).strip()
+
+for col in ["Obra Social", "Sexo", "Barrio", "Dg", "Tto"]:
+    df[col] = df[col].map(normalizar)
+
+df["paciente_id"] = range(1, len(df) + 1)
+df["sexo"] = df["Sexo"].fillna("Sin dato")
+
+ORDEN_EDAD = ["0-12", "13-17", "18-29", "30-44", "45-64", "65+"]
+df["grupo_etario"] = pd.cut(df["Edad"], bins=[-1, 12, 17, 29, 44, 64, 200],
+                            labels=ORDEN_EDAD)
+
+# ---------------------------------------------------------------
+# 3.2 Barrios: corregir errores y clasificar en zonas
+# ---------------------------------------------------------------
+SOLO_CIUDAD = {"CABA", "CAPITAL FEDERAL", "CAPITAL", "CAP. FED.", "CAP", "CAP. FED",
+               "CAP FED", "CAP.FED.", "C"}
+
+CORRECCIONES_BARRIO = {
+    "BALBANERA": "BALVANERA", "ONCE": "BALVANERA", "CONGRESO": "BALVANERA",
+    "SAM TELMO": "SAN TELMO", "LUGANO": "VILLA LUGANO", "VILLA CLUGANO": "VILLA LUGANO",
+    "PARQUE PATRCIOS": "PARQUE PATRICIOS", "SAVEEDRA": "SAAVEDRA", "BERSALLE": "VERSALLES",
+    "URQUIZA": "VILLA URQUIZA", "POMPEYA": "NUEVA POMPEYA", "SOLDATI": "VILLA SOLDATI",
+    "BAJO FLORES": "FLORES", "MONTECASTRO": "MONTE CASTRO", "PATERNAL": "LA PATERNAL",
+    "VILLA MITRE": "VILLA GENERAL MITRE", "SANTA RITA": "VILLA SANTA RITA",
+    "BARRIO NORTE": "RECOLETA", "PARQUE AVELL": "PARQUE AVELLANEDA",
+    "HURLINGAM": "HURLINGHAM", "HURLIGHAM": "HURLINGHAM", "HURLIGAN": "HURLINGHAM",
+    "ITUZAIGO": "ITUZAINGO", "FLORENCIA VARELA": "FLORENCIO VARELA", "VILLA SELINA": "VILLA CELINA",
+    "GERLY": "GERLI", "V ALSINA": "VALENTIN ALSINA", "3 DE FEBRERO": "TRES DE FEBRERO",
+    "ALTE BROWN": "ALMIRANTE BROWN", "VILLA BOSH": "VILLA BOSCH", "LANUS ESTE": "LANUS",
+    "LANUS OESTE": "LANUS", "CIUDADELA NORTE": "CIUDADELA", "TABLADA": "LA TABLADA",
+    "SAN ANTONIO DE PADUE": "SAN ANTONIO DE PADUA", "CARUPA-SAN FERNANDO": "SAN FERNANDO",
+    "DON BOSCO- QUILMES": "QUILMES", "MONTEGRANDE": "MONTE GRANDE", "G. CATAN": "GONZALEZ CATAN",
+}
+
+BARRIOS_CABA = {  # los 48 barrios oficiales de la Ciudad
+    "AGRONOMIA", "ALMAGRO", "BALVANERA", "BARRACAS", "BELGRANO", "BOEDO", "CABALLITO", "CHACARITA",
+    "COGHLAN", "COLEGIALES", "CONSTITUCION", "FLORES", "FLORESTA", "LA BOCA", "LA PATERNAL", "LINIERS",
+    "MATADEROS", "MONTE CASTRO", "MONSERRAT", "NUEVA POMPEYA", "NUNEZ", "PALERMO", "PARQUE AVELLANEDA",
+    "PARQUE CHACABUCO", "PARQUE CHAS", "PARQUE PATRICIOS", "PUERTO MADERO", "RECOLETA", "RETIRO",
+    "SAAVEDRA", "SAN CRISTOBAL", "SAN NICOLAS", "SAN TELMO", "VELEZ SARSFIELD", "VERSALLES",
+    "VILLA CRESPO", "VILLA DEL PARQUE", "VILLA DEVOTO", "VILLA GENERAL MITRE", "VILLA LUGANO",
+    "VILLA LURO", "VILLA ORTUZAR", "VILLA PUEYRREDON", "VILLA REAL", "VILLA RIACHUELO",
+    "VILLA SANTA RITA", "VILLA SOLDATI", "VILLA URQUIZA",
+}
+
+def limpiar_barrio(b):
+    if b in SOLO_CIUDAD:
+        return "CABA (sin barrio)"
+    # "CABA - CONGRESO", "CAP. FED.- BALVANERA", "BELGRANO - CAP. FED." -> nos quedamos con el barrio
+    b = re.sub(r"^(?:CABA|CAP\.? ?FED\.?)(?=[\s-])\s*-?\s*", "", b)
+    b = re.sub(r"\s*-\s*(?:CABA|CAP\.? ?FED\.?)$", "", b).strip()
+    return CORRECCIONES_BARRIO.get(b, b)
+
+df["barrio"] = df["Barrio"].map(limpiar_barrio)
+df["zona"] = np.select(
+    [df["barrio"].eq("CABA (sin barrio)"), df["barrio"].isin(BARRIOS_CABA)],
+    ["CABA sin barrio", "CABA con barrio"], default="Provincia de Bs. As.")
+
+# ---------------------------------------------------------------
+# 3.3 Tratamientos: de texto "<<FOC: 1; PSC: 2; >>" a tabla larga
+# ---------------------------------------------------------------
+DISCIPLINAS = {
+    "PSC": "Psicología", "PSP": "Psicopedagogía", "PSM": "Psicomotricidad",
+    "FOC": "Fonoaudiología", "FON": "Fonoaudiología",
+    "TOC": "Terapia ocupacional", "TOZ": "Terapia ocupacional",
+    "KNC": "Kinesiología", "KIN": "Kinesiología", "K30": "Kinesiología",
+}
+ORDEN_DISC = ["Psicología", "Psicopedagogía", "Terapia ocupacional", "Fonoaudiología",
+              "Kinesiología", "Psicomotricidad", "Otros"]
+
+filas = []
+for pid, tto in zip(df["paciente_id"], df["Tto"]):
+    for codigo, sesiones in re.findall(r"([A-Z0-9]+)\s*:\s*(\d+)", tto):
+        filas.append({"paciente_id": pid, "codigo": codigo,
+                      "disciplina": DISCIPLINAS.get(codigo, "Otros"),
+                      "sesiones": int(sesiones)})
+tto = pd.DataFrame(filas)
+# Si un paciente tiene dos códigos de la misma disciplina (ej. TOC y TOZ) se suman
+tto_disc = tto.groupby(["paciente_id", "disciplina"], as_index=False)["sesiones"].sum()
+
+por_paciente = tto_disc.groupby("paciente_id").agg(
+    sesiones_totales=("sesiones", "sum"), n_disciplinas=("disciplina", "nunique"))
+df = df.merge(por_paciente, on="paciente_id", how="left").fillna(
+    {"sesiones_totales": 0, "n_disciplinas": 0})
+for d in ORDEN_DISC:   # una columna True/False por disciplina
+    df[d] = df["paciente_id"].isin(tto_disc.loc[tto_disc["disciplina"] == d, "paciente_id"])
+
+# ---------------------------------------------------------------
+# 3.4 Diagnósticos: corregir errores de tipeo y agrupar en categorías
+# ---------------------------------------------------------------
+ERRORES_TIPEO = {   # nombre para mostrar: (patrón con errores, forma correcta)
+    "TRASNTORNO / TRANSTORNO / TRATORNO": (r"TRASNTORNO|TRANSTORNO|TRATORNO", "TRASTORNO"),
+    "ANORMALIADES / ANOMALIDADES": (r"ANORMALIADES|ANOMALIDADES|ANORMALIDDAES", "ANORMALIDADES"),
+    "ESQUISOFRENIA / EZQUIZOFRENIA": (r"ESQUISOFRENIA|EZQUIZOFRENIA|ESQUIZOFREINA", "ESQUIZOFRENIA"),
+    "ARTODESIS / ARTRODECIS": (r"ARTODESIS|ARTRODECIS", "ARTRODESIS"),
+    "EPSECIFICOS / EPECIFICADO": (r"EPSECIFIC|EPECIFIC", "ESPECIFIC"),
+    "LENGUAGE": (r"LENGUAGE", "LENGUAJE"),
+    "RETARSO / RETROSO / RETR": (r"RETARSO|RETROSO|\bRETR\b", "RETRASO"),
+    "APUNTACION": (r"APUNTACION", "AMPUTACION"),
+    "SUPERVICION": (r"SUPERVICION", "SUPERVISION"),
+    "HIPOACUCIA": (r"HIPOACUCIA", "HIPOACUSIA"),
+    "EPIEPSIA": (r"EPIEPSIA", "EPILEPSIA"),
+}
+dg = df["Dg"].copy()
+conteo_errores = []
+for nombre, (patron, correcto) in ERRORES_TIPEO.items():
+    conteo_errores.append({"error": nombre, "pacientes": int(dg.str.contains(patron).sum())})
+    dg = dg.str.replace(patron, correcto, regex=True)
+df["dg_limpio"] = dg
+errores = pd.DataFrame(conteo_errores).sort_values("pacientes", ascending=False)
+
+CATEGORIAS = {
+    "Discapacidad intelectual": r"RETRASO MENTAL|DISCAPACIDAD (?:INTELECTUAL|MENTAL)|RETRASO MADURATIVO",
+    "Motor / neurológico": (r"MARCHA|MOVILIDAD|PLEJIA|PLEGIA|PARALISIS|EPILEP|ESCLEROSIS|PARKINSON|ATAXIA|ARTR|"
+                            r"ESCOLIOSIS|CEREBROVASCULAR|MEDULAR|COORDINACION|DISCO|FRACTURA|AMPUTACION|SILLA|"
+                            r"HIDROCEFALIA|DISTROFIA|MIOTONIC|ESPONDIL|LUMB|CIATICA|RADICULO|OSTEOPOROSIS|"
+                            r"CADERA|RODILLA|ESPINA BIFIDA|AUSENCIA CONGENITA|MALFORMACION"),
+    "Conducta y atención": r"COMPORTAMIENTO|CONDUCTA|HIPERCINETIC|ATENCION|IMPULSOS|OPOSITOR|\bTICS\b|TOURETTE",
+    "Lenguaje y aprendizaje": r"HABLA|LENGUAJE|ESCOLARES|APRENDIZAJE|DISLEXIA",
+    "Salud mental (psicosis, ánimo, personalidad)": (r"ESQUIZO|PSICOSIS|PSICOTIC|BIPOLAR|DEPRESIV|AFECTIVO|"
+                            r"PERSONALIDAD|ANSIEDAD|DEMENCIA|PARANOIDE|OBSESIV|MENTAL(?:ES)? (?:NO ESPECIFICADO )?DEBIDO"),
+    "TEA / TGD": r"AUTIS|ASPERGER|GENERALIZADOS? DEL DESARROLLO|\bTEA\b|\bTGD\b",
+    "Sensorial (audición / visión)": r"HIPOACUSIA|SORDERA|AUDI|CEGUERA|\bVISION|MACULA|OPTICA|COCLEAR|OJOS",
+    "Síndrome de Down": r"DOWN",
+    "Clínico (respiratorio, cardíaco, otros)": (r"CARDI|RESPIRA|DISNEA|APNEA|PULMON|ASMA|RENAL|LUPUS|DIABET|"
+                            r"HIPOTIROID|FALLOT|ILEOSTOMIA|CIRROSIS|HEPAT|PANCREAS|INTESTINO"),
+}
+CATS = list(CATEGORIAS)
+for cat, patron in CATEGORIAS.items():
+    df[cat] = df["dg_limpio"].str.contains(patron, regex=True)
+df["n_categorias"] = df[CATS].sum(axis=1)
+
+# Agrupamos obras sociales: las dos grandes y el resto
+df["os_grupo"] = np.where(df["Obra Social"].isin(["OSECAC", "INCLUIR"]), df["Obra Social"], "Resto")
+
+# ---------------------------------------------------------------
+# Base limpia
+# ---------------------------------------------------------------
+def titulo(t):
+    return " ".join(p.capitalize() if p not in ("DE", "DEL", "LA", "LOS") or i == 0 else p.lower()
+                    for i, p in enumerate(t.split()))
+
+def localidad(fila):
+    if fila["zona"] == "CABA sin barrio":
+        return "Capital Federal"
+    if fila["zona"] == "CABA con barrio":
+        return f"Capital Federal, {titulo(fila['barrio'])}"
+    return f"Provincia de Bs. As., {titulo(fila['barrio'])}"
+
+limpio = pd.DataFrame({
+    "ID": df["paciente_id"],
+    "Obra social": df["Obra Social"].str.strip("()").str.replace(".", "", regex=False),
+    "Grupo obra social": df["os_grupo"],
+    "Edad": df["Edad"],
+    "Grupo etario": df["grupo_etario"].astype(str),
+    "Sexo": df["Sexo"].map({"F": "Femenino", "M": "Masculino"}).fillna("Sin dato"),
+    "Localidad": df.apply(localidad, axis=1),
+    "Zona": df["zona"].replace({"CABA con barrio": "Capital Federal con barrio",
+                                "CABA sin barrio": "Capital Federal sin barrio"}),
+    "Diagnóstico": df["dg_limpio"].str.rstrip(".").str.strip(),
+    "Tratamiento": df["Tto"].map(lambda t: "; ".join(f"{c}: {n}" for c, n in re.findall(r"([A-Z0-9]+)\s*:\s*(\d+)", t))),
+})
+ses = tto_disc.pivot_table(index="paciente_id", columns="disciplina", values="sesiones", aggfunc="sum").reindex(columns=ORDEN_DISC)
+ses = ses.reindex(df["paciente_id"]).fillna(0).astype(int)
+for d in ORDEN_DISC:
+    limpio[d] = ses[d].values
+limpio["Sesiones totales"] = limpio[ORDEN_DISC].sum(axis=1)
+limpio["Cantidad de disciplinas"] = (limpio[ORDEN_DISC] > 0).sum(axis=1)
+for c in CATS:
+    limpio[c] = df[c].astype(int).values
+
+diccionario = pd.DataFrame([
+    ("ID", "Número de paciente"),
+    ("Obra social / Grupo obra social", "Financiador; el grupo separa OSECAC, INCLUIR y el resto"),
+    ("Edad / Grupo etario", "Edad en años y su rango (0-12, 13-17, 18-29, 30-44, 45-64, 65+)"),
+    ("Sexo", "Femenino, Masculino o Sin dato"),
+    ("Localidad", "Formato estándar: 'Capital Federal, Barrio' o 'Provincia de Bs. As., Localidad'. "
+                  "'Capital Federal' solo = no se cargó el barrio"),
+    ("Zona", "Capital Federal con barrio, Capital Federal sin barrio o Provincia de Bs. As."),
+    ("Diagnóstico", "Texto del diagnóstico con errores de tipeo corregidos"),
+    ("Tratamiento", "Códigos estandarizados: PSC=Psicología, PSP=Psicopedagogía, PSM=Psicomotricidad, "
+                    "FOC/FON=Fonoaudiología, TOC/TOZ=Terapia ocupacional, KNC/KIN/K30=Kinesiología; número = sesiones"),
+    (", ".join(ORDEN_DISC), "Sesiones indicadas de cada disciplina (0 = no la recibe)"),
+    ("Sesiones totales / Cantidad de disciplinas", "Suma de sesiones y cantidad de disciplinas distintas"),
+    (", ".join(CATS), "Categoría diagnóstica: 1 = el diagnóstico la incluye, 0 = no (un paciente puede tener varias)"),
+], columns=["Columna", "Descripción"])
+
+with pd.ExcelWriter("CARI_limpio.xlsx") as w:
+    limpio.to_excel(w, sheet_name="Pacientes", index=False)
+    diccionario.to_excel(w, sheet_name="Diccionario", index=False)
+print(limpio.shape)
+print(limpio.head(3).T)
+print(limpio["Localidad"].value_counts().head(8))
