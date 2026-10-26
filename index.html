@@ -1,208 +1,846 @@
-"""Limpieza de la base del CARI: genera CARI_limpio.xlsx a partir del Excel original."""
-import re, unicodedata
+# ======================================================================
+# ⚙️ 0 · Configuración, librerías y estilo visual
+# ======================================================================
+# ------------------------------------------------------------------
+# Datos de la portada (editá acá si cambia algo del grupo)
+# ------------------------------------------------------------------
+UNIVERSIDAD = "Universidad Católica Argentina · Licenciatura en Ciencia de Datos"
+MATERIA     = "Programación"
+TP          = "Trabajo Práctico N.º 2"
+GRUPO       = "Grupo L´Hopital"
+INTEGRANTES = [
+    "Juan Ignacio Apreda", "Micaela Marelli", "Juana Gonzalez",
+    "Ignacio Morales", "Jose Ignacio Lopez Escriva", "Lucila Piccicacco",
+]
+
+# Base ya limpia (la generamos con limpieza_CARI.py a partir del Excel original)
+RUTA = "CARI_limpio.xlsx"
+
+# ------------------------------------------------------------------
+# Librerías
+# ------------------------------------------------------------------
+import os
 import numpy as np
 import pandas as pd
+import plotly.express as px
+from IPython.display import display, HTML
 
-df_crudo = pd.read_excel("Tp_2_Programacion.xlsx")
-df = df_crudo.copy()
+pd.set_option("display.max_colwidth", 80)
 
-def normalizar(texto):
-    """Mayúsculas, sin tildes, sin saltos de línea ni _x000D_ y sin espacios de más."""
-    if pd.isna(texto):
-        return texto
-    texto = str(texto).replace("_x000D_", " ").upper()
-    texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
-    return re.sub(r"\s+", " ", texto).strip()
+# ------------------------------------------------------------------
+# Paleta: blanco y azul (colores del centro)
+# ------------------------------------------------------------------
+# Los colores de la interfaz (títulos, tarjetas, fondos) son todos azules.
+# Para los gráficos con varias series sumamos un celeste y un ámbar de
+# acento: con sólo azules parecidos, dos series serían indistinguibles
+# (lo verificamos con un validador de daltonismo antes de elegirlos).
+AZUL_NOCHE = "#0A2463"   # títulos
+AZUL       = "#2456D6"   # color principal de los gráficos
+CELESTE    = "#17A2C8"   # segunda serie
+AMBAR      = "#E0912E"   # acento / tercera serie
+GRIS       = "#8A94A6"   # totales y "otros"
+AZUL_PALIDO = "#EAF2FF"  # fondos suaves
+BORDE      = "#D6E3FA"
 
-for col in ["Obra Social", "Sexo", "Barrio", "Dg", "Tto"]:
-    df[col] = df[col].map(normalizar)
+SECUENCIA  = [AZUL, CELESTE, AMBAR, GRIS]
+ESCALA_AZUL = ["#F4F8FF", "#C9DCFB", "#8DB5F5", "#4C86E8", "#2456D6", "#0A2463"]
 
-df["paciente_id"] = range(1, len(df) + 1)
-df["sexo"] = df["Sexo"].fillna("Sin dato")
+# Mismo color para la misma obra social / sexo en TODOS los gráficos
+COLOR_OS   = {"OSECAC": AZUL, "INCLUIR": CELESTE, "Resto": AMBAR, "Total": GRIS}
+COLOR_SEXO = {"M": AZUL, "F": CELESTE, "Sin dato": GRIS}
 
-ORDEN_EDAD = ["0-12", "13-17", "18-29", "30-44", "45-64", "65+"]
-df["grupo_etario"] = pd.cut(df["Edad"], bins=[-1, 12, 17, 29, 44, 64, 200],
-                            labels=ORDEN_EDAD)
+CONFIG_PLOTLY = {"displaylogo": False,
+                 "modeBarButtonsToRemove": ["lasso2d", "select2d"]}
 
-# ---------------------------------------------------------------
-# 3.2 Barrios: corregir errores y clasificar en zonas
-# ---------------------------------------------------------------
-SOLO_CIUDAD = {"CABA", "CAPITAL FEDERAL", "CAPITAL", "CAP. FED.", "CAP", "CAP. FED",
-               "CAP FED", "CAP.FED.", "C"}
+def estilo(fig, alto=460):
+    """Aplica el mismo diseño blanco y azul a todos los gráficos."""
+    fig.update_layout(
+        template="plotly_white",
+        height=alto,
+        font=dict(family="Poppins, Segoe UI, Arial, sans-serif", size=13, color="#1F2A44"),
+        title_font=dict(size=19, color=AZUL_NOCHE),
+        title_x=0.02,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        margin=dict(l=40, r=30, t=80, b=50),
+        hoverlabel=dict(bgcolor=AZUL_PALIDO, bordercolor=AZUL,
+                        font=dict(color=AZUL_NOCHE, size=13)),
+        legend=dict(title_text="", orientation="h", yanchor="bottom", y=1.0,
+                    xanchor="right", x=1),
+    )
+    fig.update_xaxes(showgrid=False, zeroline=False, linecolor=BORDE)
+    fig.update_yaxes(gridcolor="#E9EFF9", zeroline=False, linecolor=BORDE)
+    try:                                  # bordes redondeados (plotly >= 5.19)
+        fig.update_layout(barcornerradius=4)
+    except Exception:
+        pass
+    return fig
 
-CORRECCIONES_BARRIO = {
-    "BALBANERA": "BALVANERA", "ONCE": "BALVANERA", "CONGRESO": "BALVANERA",
-    "SAM TELMO": "SAN TELMO", "LUGANO": "VILLA LUGANO", "VILLA CLUGANO": "VILLA LUGANO",
-    "PARQUE PATRCIOS": "PARQUE PATRICIOS", "SAVEEDRA": "SAAVEDRA", "BERSALLE": "VERSALLES",
-    "URQUIZA": "VILLA URQUIZA", "POMPEYA": "NUEVA POMPEYA", "SOLDATI": "VILLA SOLDATI",
-    "BAJO FLORES": "FLORES", "MONTECASTRO": "MONTE CASTRO", "PATERNAL": "LA PATERNAL",
-    "VILLA MITRE": "VILLA GENERAL MITRE", "SANTA RITA": "VILLA SANTA RITA",
-    "BARRIO NORTE": "RECOLETA", "PARQUE AVELL": "PARQUE AVELLANEDA",
-    "HURLINGAM": "HURLINGHAM", "HURLIGHAM": "HURLINGHAM", "HURLIGAN": "HURLINGHAM",
-    "ITUZAIGO": "ITUZAINGO", "FLORENCIA VARELA": "FLORENCIO VARELA", "VILLA SELINA": "VILLA CELINA",
-    "GERLY": "GERLI", "V ALSINA": "VALENTIN ALSINA", "3 DE FEBRERO": "TRES DE FEBRERO",
-    "ALTE BROWN": "ALMIRANTE BROWN", "VILLA BOSH": "VILLA BOSCH", "LANUS ESTE": "LANUS",
-    "LANUS OESTE": "LANUS", "CIUDADELA NORTE": "CIUDADELA", "TABLADA": "LA TABLADA",
-    "SAN ANTONIO DE PADUE": "SAN ANTONIO DE PADUA", "CARUPA-SAN FERNANDO": "SAN FERNANDO",
-    "DON BOSCO- QUILMES": "QUILMES", "MONTEGRANDE": "MONTE GRANDE", "G. CATAN": "GONZALEZ CATAN",
-}
+def mostrar_fig(fig, alto=460):
+    estilo(fig, alto).show(config=CONFIG_PLOTLY)
 
-BARRIOS_CABA = {  # los 48 barrios oficiales de la Ciudad
-    "AGRONOMIA", "ALMAGRO", "BALVANERA", "BARRACAS", "BELGRANO", "BOEDO", "CABALLITO", "CHACARITA",
-    "COGHLAN", "COLEGIALES", "CONSTITUCION", "FLORES", "FLORESTA", "LA BOCA", "LA PATERNAL", "LINIERS",
-    "MATADEROS", "MONTE CASTRO", "MONSERRAT", "NUEVA POMPEYA", "NUNEZ", "PALERMO", "PARQUE AVELLANEDA",
-    "PARQUE CHACABUCO", "PARQUE CHAS", "PARQUE PATRICIOS", "PUERTO MADERO", "RECOLETA", "RETIRO",
-    "SAAVEDRA", "SAN CRISTOBAL", "SAN NICOLAS", "SAN TELMO", "VELEZ SARSFIELD", "VERSALLES",
-    "VILLA CRESPO", "VILLA DEL PARQUE", "VILLA DEVOTO", "VILLA GENERAL MITRE", "VILLA LUGANO",
-    "VILLA LURO", "VILLA ORTUZAR", "VILLA PUEYRREDON", "VILLA REAL", "VILLA RIACHUELO",
-    "VILLA SANTA RITA", "VILLA SOLDATI", "VILLA URQUIZA",
-}
+# ------------------------------------------------------------------
+# CSS + animaciones. En Colab cada salida se dibuja aparte, así que
+# cada bloque HTML lleva su propio CSS (lo hace la función mostrar()).
+# ------------------------------------------------------------------
+CSS = """
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+.cari{font-family:Poppins,'Segoe UI',Arial,sans-serif;color:#1F2A44;line-height:1.6;}
+.cari *{box-sizing:border-box;}
+.cari p{margin:.4em 0;}
+.cari b{color:#0A2463;}
+.cari code{background:#EAF2FF;color:#0A2463;padding:1px 6px;border-radius:6px;font-size:.88em;}
 
-def limpiar_barrio(b):
-    if b in SOLO_CIUDAD:
-        return "CABA (sin barrio)"
-    # "CABA - CONGRESO", "CAP. FED.- BALVANERA", "BELGRANO - CAP. FED." -> nos quedamos con el barrio
-    b = re.sub(r"^(?:CABA|CAP\.? ?FED\.?)(?=[\s-])\s*-?\s*", "", b)
-    b = re.sub(r"\s*-\s*(?:CABA|CAP\.? ?FED\.?)$", "", b).strip()
-    return CORRECCIONES_BARRIO.get(b, b)
+/* --- entradas --- */
+@keyframes subir{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+@keyframes aparecer{from{opacity:0}to{opacity:1}}
+@keyframes pop{0%{opacity:0;transform:scale(.3)}70%{transform:scale(1.12)}100%{opacity:1;transform:scale(1)}}
+.anim{animation:subir .8s ease both;}
 
-df["barrio"] = df["Barrio"].map(limpiar_barrio)
-df["zona"] = np.select(
-    [df["barrio"].eq("CABA (sin barrio)"), df["barrio"].isin(BARRIOS_CABA)],
-    ["CABA sin barrio", "CABA con barrio"], default="Provincia de Bs. As.")
+/* --- tarjetas --- */
+.card{background:#fff;border:1px solid #D6E3FA;border-radius:18px;padding:22px 26px;margin:14px 0;
+      box-shadow:0 8px 22px rgba(36,86,214,.08);animation:subir .8s ease both;}
+.card.suave{background:linear-gradient(180deg,#FFFFFF,#F4F8FF);}
+.nota{border-left:4px solid #2456D6;background:#F4F8FF;border-radius:0 12px 12px 0;padding:12px 16px;margin:12px 0;
+      color:#33415C;font-size:.95em;animation:subir .8s ease both;}
+.nota.alerta{border-left-color:#E0912E;background:#FFF8EE;}
 
-# ---------------------------------------------------------------
-# 3.3 Tratamientos: de texto "<<FOC: 1; PSC: 2; >>" a tabla larga
-# ---------------------------------------------------------------
-DISCIPLINAS = {
-    "PSC": "Psicología", "PSP": "Psicopedagogía", "PSM": "Psicomotricidad",
-    "FOC": "Fonoaudiología", "FON": "Fonoaudiología",
-    "TOC": "Terapia ocupacional", "TOZ": "Terapia ocupacional",
-    "KNC": "Kinesiología", "KIN": "Kinesiología", "K30": "Kinesiología",
-}
-ORDEN_DISC = ["Psicología", "Psicopedagogía", "Terapia ocupacional", "Fonoaudiología",
-              "Kinesiología", "Psicomotricidad", "Otros"]
+/* --- encabezado de sección --- */
+.sec{display:flex;align-items:center;gap:22px;background:#fff;border:1px solid #D6E3FA;border-radius:22px;
+     padding:20px 26px;margin:34px 0 10px;box-shadow:0 10px 26px rgba(10,36,99,.08);overflow:hidden;position:relative;
+     animation:subir .9s ease both;}
+.sec:before{content:"";position:absolute;inset:0 auto 0 0;width:7px;background:linear-gradient(#2456D6,#17A2C8);}
+.sec .num{flex:0 0 58px;height:58px;border-radius:50%;background:#2456D6;color:#fff;font-weight:800;font-size:22px;
+     display:flex;align-items:center;justify-content:center;position:relative;}
+.sec .num:after{content:"";position:absolute;inset:-6px;border-radius:50%;border:2px solid #2456D6;
+     animation:latido 2.2s ease-out infinite;}
+@keyframes latido{0%{transform:scale(.9);opacity:.9}100%{transform:scale(1.45);opacity:0}}
+.sec h2{margin:0;color:#0A2463;font-size:23px;line-height:1.25;}
+.sec .sub{margin:4px 0 0;color:#52607A;font-size:14.5px;}
+.sec .icono{margin-left:auto;flex:0 0 auto;}
 
+/* --- tabla --- */
+table.tabla{border-collapse:separate;border-spacing:0;width:100%;font-size:13.5px;background:#fff!important;
+     border:1px solid #D6E3FA;border-radius:14px;overflow:hidden;}
+.tabla thead th{background:#2456D6!important;color:#fff!important;padding:10px 12px;text-align:center;font-weight:600;white-space:normal;line-height:1.3;}
+.tabla tbody th,.tabla tbody td{background:#fff!important;color:#1F2A44!important;padding:9px 12px;
+     border-bottom:1px solid #EDF2FB;text-align:center;}
+.tabla tbody th{text-align:left;font-weight:600;color:#0A2463!important;}
+.tabla tbody tr:hover td,.tabla tbody tr:hover th{background:#F4F8FF!important;}
+.scroll{overflow-x:auto;}
+
+/* --- cómo leer una tabla --- */
+.leer{background:#F4F8FF;border:1px dashed #8DB5F5;border-radius:14px;padding:14px 18px;margin-top:12px;font-size:14px;}
+.leer h4{margin:0 0 6px;color:#2456D6;font-size:15px;}
+.leer ul{margin:4px 0 0;padding-left:20px;} .leer li{margin-bottom:4px;}
+
+/* --- chips --- */
+.chip{display:inline-block;background:#EAF2FF;color:#0A2463;border:1px solid #C9DCFB;border-radius:999px;
+      padding:3px 12px;margin:3px 4px 3px 0;font-size:13px;font-weight:500;}
+@media (max-width:640px){.sec{flex-wrap:wrap}.sec .icono{margin-left:0}}
+</style>
+"""
+
+def mostrar(html):
+    """Muestra un bloque HTML con el estilo del trabajo."""
+    display(HTML(CSS + f'<div class="cari">{html}</div>'))
+
+def seccion(numero, titulo, subtitulo, icono=""):
+    mostrar(f"""
+    <div class="sec">
+      <div class="num">{numero}</div>
+      <div><h2>{titulo}</h2><p class="sub">{subtitulo}</p></div>
+      <div class="icono">{icono}</div>
+    </div>""")
+
+def tabla(df_, decimales=1, indice=True):
+    """Convierte un DataFrame en una tabla HTML azul."""
+    html_ = df_.to_html(classes="tabla", border=0, index=indice, na_rep="—",
+                        float_format=lambda v: f"{v:,.{decimales}f}")
+    return f'<div class="scroll">{html_}</div>'
+
+def nota(texto, alerta=False):
+    mostrar(f'<div class="nota {"alerta" if alerta else ""}">{texto}</div>')
+
+# Listas que usamos en todo el trabajo
+ORDEN_EDAD  = ["0-12", "13-17", "18-29", "30-44", "45-64", "65+"]
+DISCIPLINAS = ["Psicología", "Psicopedagogía", "Terapia ocupacional", "Fonoaudiología",
+               "Kinesiología", "Psicomotricidad", "Otros"]
+CATS = ["Discapacidad intelectual", "Motor / neurológico", "Conducta y atención",
+        "Lenguaje y aprendizaje", "Salud mental (psicosis, ánimo, personalidad)", "TEA / TGD",
+        "Sensorial (audición / visión)", "Síndrome de Down", "Clínico (respiratorio, cardíaco, otros)"]
+
+# Carga de la base limpia (en Colab: subila al panel de archivos)
+if not os.path.exists(RUTA):
+    from google.colab import files
+    print("Subí el archivo CARI_limpio.xlsx:")
+    RUTA = list(files.upload().keys())[0]
+df = pd.read_excel(RUTA)
+df["Grupo etario"] = pd.Categorical(df["Grupo etario"], categories=ORDEN_EDAD, ordered=True)
+
+
+# ======================================================================
+# 🏥 Portada
+# ======================================================================
+iniciales = lambda n: "".join(p[0] for p in n.split()[:2]).upper()
+avatares = "".join(
+    f'<div class="persona" style="animation-delay:{0.25 + i*0.15:.2f}s">'
+    f'<span class="ava">{iniciales(n)}</span><span>{n}</span></div>'
+    for i, n in enumerate(INTEGRANTES))
+
+cruces = "".join(
+    f'<span class="cruz" style="left:{x}%;top:{y}%;font-size:{s}px;animation-delay:{d}s">+</span>'
+    for x, y, s, d in [(6,18,34,0),(18,70,22,1.2),(34,12,18,2.1),(58,78,26,.6),
+                       (73,16,30,1.7),(88,60,20,.3),(94,22,16,2.6),(46,40,14,3)])
+
+mostrar(f"""
+<style>
+.hero{{position:relative;overflow:hidden;border-radius:26px;padding:46px 40px 92px;color:#fff;
+      background:linear-gradient(135deg,#0A2463 0%,#1D47B8 50%,#3C8DF0 100%);
+      box-shadow:0 18px 40px rgba(10,36,99,.28);animation:subir .9s ease both;}}
+.hero .tag{{display:inline-block;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.35);
+      padding:4px 14px;border-radius:999px;font-size:13px;letter-spacing:.5px;}}
+.hero h1{{font-size:38px;line-height:1.15;margin:16px 0 10px;font-weight:800;color:#fff;max-width:780px;}}
+.hero p{{margin:0;font-size:16px;opacity:.92;max-width:700px;}}
+.cruz{{position:absolute;color:rgba(255,255,255,.22);font-weight:800;animation:flotar 7s ease-in-out infinite;}}
+@keyframes flotar{{0%,100%{{transform:translateY(0) rotate(0)}}50%{{transform:translateY(-16px) rotate(90deg)}}}}
+.ecg{{position:absolute;left:0;right:0;bottom:16px;width:100%;height:70px;}}
+.ecg path{{fill:none;stroke:#fff;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;
+      stroke-dasharray:1400;stroke-dashoffset:1400;animation:trazo 3.2s linear infinite;
+      filter:drop-shadow(0 0 4px rgba(255,255,255,.8));}}
+.ecg .base{{stroke:rgba(255,255,255,.18);stroke-dasharray:none;animation:none;filter:none;}}
+@keyframes trazo{{to{{stroke-dashoffset:0}}}}
+.corazon{{position:absolute;right:42px;top:38px;font-size:54px;animation:bombeo 1.1s ease-in-out infinite;}}
+@keyframes bombeo{{0%,100%{{transform:scale(1)}}15%{{transform:scale(1.18)}}30%{{transform:scale(.96)}}45%{{transform:scale(1.1)}}}}
+.grupo{{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:14px;}}
+.persona{{display:flex;align-items:center;gap:10px;background:#F4F8FF;border:1px solid #D6E3FA;border-radius:999px;
+      padding:6px 16px 6px 6px;font-size:14px;color:#0A2463;font-weight:500;animation:pop .6s ease both;}}
+.ava{{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#2456D6,#17A2C8);color:#fff;
+      display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;}}
+.indice{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:10px;}}
+.indice div{{background:#fff;border:1px solid #D6E3FA;border-radius:12px;padding:10px 14px;font-size:14px;
+      animation:subir .7s ease both;}}
+.indice b{{color:#2456D6;margin-right:6px;}}
+</style>
+
+<div class="hero">
+  {cruces}
+  <div class="corazon">💙</div>
+  <span class="tag">{UNIVERSIDAD}</span>
+  <h1>Análisis de pacientes del CARI: ¿qué problemas muestran los datos?</h1>
+  <p>{TP} · {MATERIA}. Exploramos la base de pacientes del centro para encontrar problemáticas
+     y proponer soluciones apoyadas en datos.</p>
+  <svg class="ecg" viewBox="0 0 1200 70" preserveAspectRatio="none">
+    <path class="base" d="M0 40 H1200"/>
+    <path d="M0 40 H170 l18 0 l10 -14 l10 14 h18 l8 10 l14 -48 l14 62 l10 -24 h30 l14 -8 l14 8 H520
+             l18 0 l10 -14 l10 14 h18 l8 10 l14 -48 l14 62 l10 -24 h30 l14 -8 l14 8 H870
+             l18 0 l10 -14 l10 14 h18 l8 10 l14 -48 l14 62 l10 -24 h30 l14 -8 l14 8 H1200"/>
+  </svg>
+</div>
+
+<div class="card suave" style="text-align:center">
+  <div style="font-size:13px;color:#52607A;letter-spacing:1.5px;text-transform:uppercase">Integrantes</div>
+  <div style="font-size:24px;font-weight:800;color:#0A2463">{GRUPO}</div>
+  <div class="grupo">{avatares}</div>
+</div>
+
+<div class="card">
+  <b>Objetivo.</b> Explorar la base de pacientes del centro (obra social, edad, sexo, barrio, diagnóstico y
+  tratamiento indicado) para identificar problemáticas y proponer soluciones.
+  <br><b>Herramientas:</b> <code>pandas</code> para limpiar y transformar, <code>plotly.express</code> para
+  los gráficos interactivos (pasá el mouse, hacé zoom o clic en la leyenda) e <code>IPython.display</code> para la presentación.
+  <div class="indice">
+    {"".join(f'<div style="animation-delay:{.1*i:.1f}s"><b>{n}</b>{t}</div>' for i,(n,t) in enumerate([
+      ("1","Marco teórico"),("2","Los datos"),("3","Perfil de los pacientes"),("4","Diagnósticos"),
+      ("5","Tratamientos"),("6","Problemática 1: brecha diagnóstico–tratamiento"),
+      ("7","Problemática 2: dependencia de financiadores"),("8","Territorio"),("9","Indicadores clave"),
+      ("10","Conclusiones y propuestas")]))}
+  </div>
+</div>
+""")
+
+
+# ======================================================================
+# 📚 1 · Marco teórico
+# ======================================================================
+libro = """
+<style>
+.libro{position:relative;width:96px;height:64px;perspective:400px;}
+.libro .tapa{position:absolute;bottom:0;width:96px;height:58px;border-radius:6px;background:#0A2463;}
+.libro .hoja{position:absolute;bottom:4px;left:48px;width:44px;height:52px;background:#fff;border:1px solid #C9DCFB;
+     border-radius:0 4px 4px 0;transform-origin:left center;animation:pasar 2.6s ease-in-out infinite;}
+.libro .hoja.fija-i{left:4px;border-radius:4px 0 0 4px;animation:none;}
+.libro .hoja.fija-d{animation:none;}
+.libro .hoja.h2{animation-delay:.9s;} .libro .hoja.h3{animation-delay:1.8s;}
+.libro .hoja:before{content:"";position:absolute;left:7px;right:7px;top:10px;height:28px;
+     background:repeating-linear-gradient(#C9DCFB 0 2px,transparent 2px 7px);}
+@keyframes pasar{0%,15%{transform:rotateY(0)}55%,100%{transform:rotateY(-180deg)}}
+.graf{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-top:10px;}
+.graf div{background:#F4F8FF;border:1px solid #D6E3FA;border-radius:14px;padding:12px 14px;font-size:14px;
+     animation:subir .7s ease both;}
+.graf .tt{display:block;color:#2456D6;font-weight:700;margin-bottom:2px;}
+</style>
+<div class="libro"><div class="tapa"></div><div class="hoja fija-i"></div><div class="hoja fija-d"></div>
+<div class="hoja"></div><div class="hoja h2"></div><div class="hoja h3"></div></div>
+"""
+seccion(1, "Marco teórico", "Estadística descriptiva y los gráficos que usamos para resumir los datos", libro)
+
+W = "https://learning-oreilly-com.bibliotecauca.idm.oclc.org/library/view/fundamentals-of-data/9781492031079/"
+GRAFICOS = [
+    ("Gráfico de barras", W + "ch06.html", "Wilke, cap. 6",
+     "Para cada categoría dibuja una barra que empieza en cero y llega hasta su valor. Si las etiquetas son largas, "
+     "se giran los ejes y las barras quedan <b>horizontales</b>. En las barras <b>agrupadas</b>, cada posición del eje "
+     "tiene un grupo de barras que corresponde a una segunda variable categórica (por ejemplo, el sexo dentro de cada grupo etario)."),
+    ("Mapa de calor", W + "ch06.html", "Wilke, cap. 6",
+     "En lugar de usar el largo de una barra, representa cada valor con un color: más oscuro, mayor valor. Sirve cuando "
+     "hay muchos datos y las barras quedarían demasiado cargadas, como al cruzar diagnósticos con grupos etarios."),
+    ("Boxplot (diagrama de caja)", W + "ch09.html", "Wilke, caps. 7 y 9",
+     "Muestra la <a href='" + W + "ch07.html' target='_blank'>distribución</a> de una variable (qué proporción de los "
+     "datos toma cada valor) dividiéndola en cuartiles. La línea del medio es la mediana y la caja encierra el 50% central "
+     "de los datos. Los bigotes llegan hasta el mínimo y el máximo, o hasta 1,5 veces el alto de la caja si eso es más "
+     "corto. Los puntos que quedan afuera se consideran valores atípicos."),
+    ("Gráfico circular (torta)", W + "ch10.html#visualizing-proportions-separately-as-parts-of-the-total", "Wilke, cap. 10",
+     "Divide un círculo en porciones cuya área es proporcional a la fracción del total que representa cada parte. "
+     "Funciona bien con pocas categorías, como el reparto de pacientes entre obras sociales."),
+    ("Treemap", W + "ch11.html", "Wilke, cap. 11",
+     "Muestra proporciones anidadas: un rectángulo se divide en rectángulos más chicos cuya área representa la proporción, "
+     "y dentro de cada uno se vuelven a anidar otros (por ejemplo, zona → barrio)."),
+]
+mostrar(f"""
+<div class="card">
+<p>La <b>estadística descriptiva</b> es el primer paso de cualquier análisis: resumir los datos para entender cómo
+son antes de sacar conclusiones. Bruce, Bruce y Gedeck (2020) distinguen dos dimensiones para las variables
+numéricas. Las <b>medidas de posición</b> (o de tendencia central) buscan un “valor típico”: la <b>media</b> (la suma
+de los valores dividida por la cantidad) y la <b>mediana</b> (el valor que deja la mitad de los datos por debajo y la
+mitad por encima). La mediana es <i>robusta</i>: no la afectan los valores extremos, que sí corren a la media. Las
+<b>medidas de dispersión</b> indican si los datos están concentrados o dispersos: el <b>desvío estándar</b> (la raíz
+de la varianza, en la misma unidad que los datos) y los <b>percentiles</b>, en especial los cuartiles (25%, 50% y 75%).
+Para las variables categóricas, como la obra social o el diagnóstico, el resumen son las <b>frecuencias y
+proporciones</b> de cada categoría, y la <b>moda</b> es la categoría que más se repite. Cuando se cruzan dos
+variables categóricas se usa una <b>tabla de contingencia</b>, que cuenta los casos de cada combinación.</p>
+<p style="margin-top:12px"><b>Gráficos que usamos en el trabajo</b></p>
+<div class="graf">{"".join(f'<div style="animation-delay:{i*.1:.1f}s"><span class="tt">{n}</span>{t}<br>'
+                           f'<a href="{url}" target="_blank" style="font-size:12.5px;color:#2456D6">📖 {ref}</a></div>'
+                           for i, (n, url, ref, t) in enumerate(GRAFICOS))}</div>
+</div>
+<div class="nota">
+<b>Referencias</b> (colección O'Reilly de la Biblioteca UCA)<br>
+Bruce, P., Bruce, A. y Gedeck, P. (2020). <i>Practical Statistics for Data Scientists: 50+ Essential Concepts Using
+R and Python</i> (2.ª ed.). O'Reilly Media. Cap. 1, <i>Exploratory Data Analysis</i>.<br>
+Wilke, C. O. (2019). <i>Fundamentals of Data Visualization: A Primer on Making Informative and Compelling Figures</i>.
+O'Reilly Media. Caps. <a href="{W}ch06.html" target="_blank">6</a>, <a href="{W}ch07.html" target="_blank">7</a>,
+<a href="{W}ch09.html" target="_blank">9</a>, <a href="{W}ch10.html" target="_blank">10</a> y
+<a href="{W}ch11.html" target="_blank">11</a>.
+</div>
+""")
+
+
+# ======================================================================
+# 📥 2 · Los datos
+# ======================================================================
+planilla = """
+<style>
+.hoja-calc{width:96px;height:70px;border:2px solid #2456D6;border-radius:8px;background:#fff;position:relative;overflow:hidden;}
+.hoja-calc i{display:block;height:9px;margin:6px 8px;border-radius:3px;background:#C9DCFB;
+     animation:cargar 2.4s ease-in-out infinite;transform-origin:left;}
+.hoja-calc i:nth-child(2){animation-delay:.25s}.hoja-calc i:nth-child(3){animation-delay:.5s}.hoja-calc i:nth-child(4){animation-delay:.75s}
+@keyframes cargar{0%{transform:scaleX(.1);background:#C9DCFB}60%,100%{transform:scaleX(1);background:#2456D6}}
+</style>
+<div class="hoja-calc"><i></i><i></i><i></i><i></i></div>"""
+seccion(2, "Los datos", f"{len(df)} pacientes del centro: obra social, edad, sexo, localidad, diagnóstico y tratamiento", planilla)
+
+columnas = ["Obra social", "Edad", "Sexo", "Localidad", "Tratamiento", "Sesiones totales"]
+mostrar(f"""
+<div class="card"><b>Primeras filas de la base limpia</b>{tabla(df[columnas].head(5), 0, indice=False)}</div>
+<div class="nota">Antes de analizar, <b>limpiamos la base</b>: unificamos las distintas formas en que estaba escrita
+Capital Federal (CABA, CAPITAL, CAP. FED., etc.) con el formato <code>Capital Federal, Barrio</code>, corregimos
+errores de tipeo en barrios y diagnósticos, y pasamos los tratamientos a una columna de sesiones por disciplina.
+Los diagnósticos los agrupamos en {len(CATS)} categorías amplias.</div>
+""")
+
+
+# ======================================================================
+# 👥 3 · Perfil de los pacientes
+# ======================================================================
+pct_m = df["Sexo"].eq("Masculino").mean()
+icono_persona = lambda c, d: (f'<svg class="pers" style="animation-delay:{d:.2f}s" viewBox="0 0 24 40" width="16" height="28">'
+                              f'<circle cx="12" cy="7" r="6" fill="{c}"/><rect x="4" y="15" width="16" height="25" rx="7" fill="{c}"/></svg>')
+personas = "".join(icono_persona(AZUL if i < round(pct_m * 10) else CELESTE, .12 * i) for i in range(10))
+seccion(3, "Perfil de los pacientes", "Quiénes son: edad y sexo", f"""
+<style>
+.multitud{{display:flex;gap:4px;align-items:flex-end;}}
+.pers{{animation:pop .5s ease both, saltito 2.4s ease-in-out infinite;}}
+@keyframes saltito{{0%,80%,100%{{transform:translateY(0)}}88%{{transform:translateY(-5px)}}}}
+</style>
+<div class="multitud">{personas}</div>
+<div style="font-size:11px;color:#52607A;margin-top:4px"><span style="color:{AZUL}">●</span> varones
+&nbsp;<span style="color:{CELESTE}">●</span> mujeres</div>""")
+
+con_sexo = df[df["Sexo"] != "Sin dato"]
+mediana = df["Edad"].median()
+
+# Boxplot horizontal de la edad por sexo
+fig = px.box(con_sexo, x="Edad", y="Sexo", color="Sexo", notched=True,
+             color_discrete_map={"Masculino": AZUL, "Femenino": CELESTE},
+             category_orders={"Sexo": ["Femenino", "Masculino"]},
+             labels={"Edad": "Edad (años)", "Sexo": ""},
+             title=f"Distribución de la edad por sexo (mediana general: {mediana:.0f} años)")
+fig.update_layout(showlegend=False)
+mostrar_fig(fig, 320)
+
+# Pacientes por grupo etario y sexo
+grupos = con_sexo.groupby(["Grupo etario", "Sexo"], observed=False).size().reset_index(name="Pacientes")
+fig = px.bar(grupos, x="Grupo etario", y="Pacientes", color="Sexo", barmode="group", text="Pacientes",
+             color_discrete_map={"Masculino": AZUL, "Femenino": CELESTE},
+             category_orders={"Sexo": ["Masculino", "Femenino"]},
+             title="Pacientes por grupo etario: el grueso tiene entre 18 y 29 años")
+fig.update_traces(textposition="outside", cliponaxis=False)
+mostrar_fig(fig, 430)
+
+resumen = df.groupby("Sexo")["Edad"].describe().round(1)
+resumen["count"] = resumen["count"].astype(int)
+resumen.columns = ["Cantidad", "Media", "Desvío", "Mínimo", "Q1 (25%)", "Mediana", "Q3 (75%)", "Máximo"]
+resumen.index.name = None
+mostrar(f'<div class="card"><b>Estadística descriptiva de la edad según sexo</b>{tabla(resumen, 1)}</div>')
+nota(f"La población es mayormente joven (mediana <b>{mediana:.0f} años</b>; el {(df['Edad'] < 18).mean()*100:.0f}% es "
+     f"menor de 18). Las mujeres son algo mayores en promedio ({resumen.loc['Femenino','Media']:.0f} vs "
+     f"{resumen.loc['Masculino','Media']:.0f} años) y predominan en las edades avanzadas.")
+
+
+# ======================================================================
+# 🧩 4 · Diagnósticos
+# ======================================================================
+seccion(4, "Diagnósticos", "Qué tienen los pacientes y cómo cambia con la edad", """
+<style>
+.rompe{position:relative;width:92px;height:92px;}
+.rompe span{position:absolute;width:40px;height:40px;border-radius:9px;font-size:22px;display:flex;align-items:center;
+     justify-content:center;animation:encajar 3.6s ease-in-out infinite;}
+.rompe span:nth-child(1){left:4px;top:4px;background:#2456D6;--x:-14px;--y:-14px;}
+.rompe span:nth-child(2){left:48px;top:4px;background:#17A2C8;--x:14px;--y:-14px;animation-delay:.15s}
+.rompe span:nth-child(3){left:4px;top:48px;background:#8DB5F5;--x:-14px;--y:14px;animation-delay:.3s}
+.rompe span:nth-child(4){left:48px;top:48px;background:#0A2463;--x:14px;--y:14px;animation-delay:.45s}
+@keyframes encajar{0%,100%{transform:translate(var(--x),var(--y)) rotate(-12deg);opacity:.6}40%,70%{transform:none;opacity:1}}
+</style>
+<div class="rompe"><span>🧠</span><span>🗣️</span><span>🦽</span><span>👂</span></div>""")
+
+ejemplo = "RETRASO MENTAL MODERADO + TRASTORNOS ESPECÍFICOS DEL DESARROLLO DEL HABLA Y DEL LENGUAJE"
+mostrar(f"""<div class="leer"><h4>¿Qué es una categoría diagnóstica?</h4>
+Cada paciente tiene un diagnóstico escrito como texto (CIE-10). Como hay cientos de textos distintos, los agrupamos en
+{len(CATS)} <b>categorías de diagnóstico</b> (no son tratamientos). Por ejemplo, <b>Discapacidad intelectual</b> reúne a
+todos los diagnósticos de retraso mental (leve, moderado, grave o no especificado) y de retraso madurativo.<br>
+Un mismo diagnóstico puede nombrar varias condiciones. Si un paciente tiene <i>{ejemplo}</i>, cae en dos categorías:
+Discapacidad intelectual y Lenguaje y aprendizaje. Por eso, cuando decimos que un paciente tiene <b>2 o más categorías</b>,
+hablamos de comorbilidad (varios problemas de salud a la vez): le pasa al
+<b>{(df[CATS].sum(axis=1) >= 2).mean()*100:.0f}%</b> de los pacientes, y por eso las barras de abajo suman más de {len(df)}.
+</div>""")
+
+conteo = df[CATS].sum().sort_values().rename_axis("Categoría").reset_index(name="Pacientes")
+fig = px.bar(conteo, x="Pacientes", y="Categoría", orientation="h", color_discrete_sequence=[AZUL],
+             text=(conteo["Pacientes"] / len(df) * 100).map(lambda v: f"{v:.0f}%"),
+             title="Pacientes por categoría diagnóstica (un paciente puede estar en varias)")
+fig.update_traces(textposition="outside", cliponaxis=False,
+                  hovertemplate="<b>%{y}</b><br>%{x} pacientes<extra></extra>")
+fig.update_layout(yaxis_title="")
+mostrar_fig(fig, 460)
+
+calor = (df.groupby("Grupo etario", observed=False)[CATS].mean() * 100).T.round(0)
+fig = px.imshow(calor, text_auto=".0f", aspect="auto", color_continuous_scale=ESCALA_AZUL,
+                labels=dict(x="Grupo etario", y="", color="% de pacientes"),
+                title="% de pacientes de cada grupo etario con cada categoría diagnóstica")
+fig.update_traces(hovertemplate="<b>%{y}</b><br>Grupo %{x}: %{z:.0f}%<extra></extra>")
+fig.update_xaxes(side="top", title="")
+mostrar_fig(fig, 520)
+nota("La discapacidad intelectual es la categoría más frecuente. El perfil cambia mucho con la edad: en los niños "
+     "predominan TEA y lenguaje/aprendizaje; desde los 45 años ganan peso lo motor/neurológico, lo sensorial y la "
+     "salud mental. Eso debería verse reflejado en las disciplinas que recibe cada grupo.")
+
+
+# ======================================================================
+# 💬 5 · Tratamientos
+# ======================================================================
+seccion(5, "Tratamientos", "Qué disciplinas se indican y a quiénes", """
+<style>
+.orbita{position:relative;width:104px;height:104px;}
+.orbita .centro{position:absolute;left:32px;top:32px;width:40px;height:40px;border-radius:50%;background:#2456D6;
+     color:#fff;font-size:20px;display:flex;align-items:center;justify-content:center;
+     box-shadow:0 0 0 6px rgba(36,86,214,.15);animation:bombeo 1.6s ease-in-out infinite;}
+@keyframes bombeo{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+.orbita .anillo{position:absolute;inset:0;border:1.5px dashed #C9DCFB;border-radius:50%;animation:girar 9s linear infinite;}
+.orbita .anillo span{position:absolute;width:24px;height:24px;border-radius:50%;background:#fff;border:2px solid #17A2C8;
+     font-size:12px;display:flex;align-items:center;justify-content:center;animation:girar 9s linear infinite reverse;}
+@keyframes girar{to{transform:rotate(360deg)}}
+</style>
+<div class="orbita"><div class="anillo">
+ <span style="left:40px;top:-12px">📖</span><span style="right:-12px;top:40px">🗣️</span>
+ <span style="left:40px;bottom:-12px">🦵</span><span style="left:-12px;top:40px">✋</span>
+</div><div class="centro">🧠</div></div>""")
+
+sesiones = df[DISCIPLINAS].sum().sort_values().rename_axis("Disciplina").reset_index(name="Sesiones")
+sesiones["%"] = sesiones["Sesiones"] / sesiones["Sesiones"].sum() * 100
+fig = px.bar(sesiones, x="Sesiones", y="Disciplina", orientation="h", color_discrete_sequence=[AZUL],
+             text=sesiones["%"].map(lambda v: f"{v:.0f}%"),
+             labels={"Sesiones": "Sesiones indicadas (suma de todos los pacientes)", "Disciplina": ""},
+             title="Sesiones indicadas por disciplina: Psicología concentra la mitad")
+fig.update_traces(textposition="outside", cliponaxis=False, hovertemplate="<b>%{y}</b><br>%{x} sesiones<extra></extra>")
+mostrar_fig(fig, 420)
+
+una = (df.groupby("Grupo etario", observed=False)["Cantidad de disciplinas"]
+       .apply(lambda s: (s == 1).mean() * 100).reset_index(name="%"))
+fig = px.bar(una, x="Grupo etario", y="%", color_discrete_sequence=[CELESTE], range_y=[0, 100],
+             text=una["%"].map(lambda v: f"{v:.0f}%"), labels={"%": "% con una sola disciplina"},
+             title=f"El {(df['Cantidad de disciplinas'] == 1).mean()*100:.0f}% recibe una sola disciplina, "
+                   "y el porcentaje se dispara con la edad")
+fig.update_traces(textposition="outside", cliponaxis=False)
+mostrar_fig(fig, 420)
+
+nota(f"Psicología está indicada al <b>{(df['Psicología'] > 0).mean()*100:.0f}%</b> de los pacientes y concentra el "
+     f"<b>{sesiones.set_index('Disciplina').loc['Psicología','%']:.0f}%</b> de las sesiones. Entre los mayores de 30, "
+     "la mayoría recibe una sola disciplina (casi siempre Psicología), aunque es justo el grupo donde crecen los "
+     "diagnósticos motores y sensoriales.")
+
+
+# ======================================================================
+# 🌉 6 · Problemática 1: brecha diagnóstico–tratamiento
+# ======================================================================
+seccion(6, "Problemática 1: brecha diagnóstico–tratamiento",
+        "Pacientes cuyo diagnóstico sugiere una disciplina que no reciben", """
+<style>
+.puente{display:flex;align-items:center;font-size:11px;font-weight:700;}
+.puente .lado{background:#2456D6;color:#fff;border-radius:8px;padding:8px;}
+.puente .lado.b{background:#17A2C8;}
+.puente .hueco{position:relative;width:56px;height:28px;}
+.puente .hueco:before,.puente .hueco:after{content:"";position:absolute;top:13px;height:3px;width:22px;background:#2456D6;
+     animation:tender 2.8s ease-in-out infinite;}
+.puente .hueco:before{left:0;transform-origin:left;}
+.puente .hueco:after{right:0;background:#17A2C8;transform-origin:right;}
+.puente .hueco i{position:absolute;left:24px;top:2px;font-style:normal;font-size:16px;color:#E0912E;animation:parpadeo 1.4s infinite;}
+@keyframes tender{0%,100%{transform:scaleX(.4)}50%{transform:scaleX(1)}}
+@keyframes parpadeo{50%{opacity:.15}}
+</style>
+<div class="puente"><span class="lado">Diagnóstico</span><span class="hueco"><i>?</i></span><span class="lado b">Tratamiento</span></div>""")
+
+# Pares diagnóstico -> disciplina que uno esperaría encontrar juntos
+PARES = [("Lenguaje y aprendizaje", "Fonoaudiología"),
+         ("Motor / neurológico", "Kinesiología"),
+         ("Sensorial (audición / visión)", "Fonoaudiología")]
 filas = []
-for pid, tto in zip(df["paciente_id"], df["Tto"]):
-    for codigo, sesiones in re.findall(r"([A-Z0-9]+)\s*:\s*(\d+)", tto):
-        filas.append({"paciente_id": pid, "codigo": codigo,
-                      "disciplina": DISCIPLINAS.get(codigo, "Otros"),
-                      "sesiones": int(sesiones)})
-tto = pd.DataFrame(filas)
-# Si un paciente tiene dos códigos de la misma disciplina (ej. TOC y TOZ) se suman
-tto_disc = tto.groupby(["paciente_id", "disciplina"], as_index=False)["sesiones"].sum()
+for cat, disc in PARES:
+    con_dg = df[df[cat] == 1]
+    for grupo, g in [("Total", con_dg)] + list(con_dg.groupby("Grupo obra social")):
+        filas.append({"Par": f"{cat.split(' (')[0]} → sin {disc}", "Obra social": grupo,
+                      "%": (g[disc] == 0).mean() * 100, "n": len(g)})
+brecha = pd.DataFrame(filas)
 
-por_paciente = tto_disc.groupby("paciente_id").agg(
-    sesiones_totales=("sesiones", "sum"), n_disciplinas=("disciplina", "nunique"))
-df = df.merge(por_paciente, on="paciente_id", how="left").fillna(
-    {"sesiones_totales": 0, "n_disciplinas": 0})
-for d in ORDEN_DISC:   # una columna True/False por disciplina
-    df[d] = df["paciente_id"].isin(tto_disc.loc[tto_disc["disciplina"] == d, "paciente_id"])
+fig = px.bar(brecha, x="%", y="Par", color="Obra social", barmode="group", orientation="h",
+             text=brecha["%"].map(lambda v: f"{v:.0f}%"), custom_data=["n"], color_discrete_map=COLOR_OS,
+             category_orders={"Obra social": ["Resto", "INCLUIR", "OSECAC", "Total"],
+                              "Par": [f"{c.split(' (')[0]} → sin {d}" for c, d in PARES][::-1]},
+             labels={"Par": "", "%": "% de pacientes sin la disciplina"}, range_x=[0, 112],
+             title="% de pacientes que NO recibe la disciplina esperable para su diagnóstico")
+fig.update_traces(textposition="outside", cliponaxis=False,
+                  hovertemplate="<b>%{y}</b><br>%{x:.1f}% sin la disciplina<br>sobre %{customdata[0]} pacientes<extra></extra>")
+fig.update_layout(legend=dict(traceorder="reversed"))
+mostrar_fig(fig, 500)
 
-# ---------------------------------------------------------------
-# 3.4 Diagnósticos: corregir errores de tipeo y agrupar en categorías
-# ---------------------------------------------------------------
-ERRORES_TIPEO = {   # nombre para mostrar: (patrón con errores, forma correcta)
-    "TRASNTORNO / TRANSTORNO / TRATORNO": (r"TRASNTORNO|TRANSTORNO|TRATORNO", "TRASTORNO"),
-    "ANORMALIADES / ANOMALIDADES": (r"ANORMALIADES|ANOMALIDADES|ANORMALIDDAES", "ANORMALIDADES"),
-    "ESQUISOFRENIA / EZQUIZOFRENIA": (r"ESQUISOFRENIA|EZQUIZOFRENIA|ESQUIZOFREINA", "ESQUIZOFRENIA"),
-    "ARTODESIS / ARTRODECIS": (r"ARTODESIS|ARTRODECIS", "ARTRODESIS"),
-    "EPSECIFICOS / EPECIFICADO": (r"EPSECIFIC|EPECIFIC", "ESPECIFIC"),
-    "LENGUAGE": (r"LENGUAGE", "LENGUAJE"),
-    "RETARSO / RETROSO / RETR": (r"RETARSO|RETROSO|\bRETR\b", "RETRASO"),
-    "APUNTACION": (r"APUNTACION", "AMPUTACION"),
-    "SUPERVICION": (r"SUPERVICION", "SUPERVISION"),
-    "HIPOACUCIA": (r"HIPOACUCIA", "HIPOACUSIA"),
-    "EPIEPSIA": (r"EPIEPSIA", "EPILEPSIA"),
-}
-dg = df["Dg"].copy()
-conteo_errores = []
-for nombre, (patron, correcto) in ERRORES_TIPEO.items():
-    conteo_errores.append({"error": nombre, "pacientes": int(dg.str.contains(patron).sum())})
-    dg = dg.str.replace(patron, correcto, regex=True)
-df["dg_limpio"] = dg
-errores = pd.DataFrame(conteo_errores).sort_values("pacientes", ascending=False)
+# Tabla: porcentaje y, entre paréntesis, cuántos pacientes hay en cada grupo
+brecha["celda"] = brecha.apply(lambda f: f"{f['%']:.1f}% ({f['n']})", axis=1)
+tabla_brecha = brecha.pivot(index="Par", columns="Obra social", values="celda")
+tabla_brecha = tabla_brecha.loc[[f"{c.split(' (')[0]} → sin {d}" for c, d in PARES], ["Total", "OSECAC", "INCLUIR", "Resto"]]
+ej = brecha[(brecha["Par"].str.startswith("Motor")) & (brecha["Obra social"] == "OSECAC")].iloc[0]
+mostrar(f"""<div class="card"><b>% de pacientes sin la disciplina esperable</b>
+{tabla(tabla_brecha.rename_axis(index=None, columns=None))}
+<div class="leer"><h4>Cómo leer esta tabla</h4><ul>
+<li><b>Cada fila</b> es un par “diagnóstico → disciplina que debería acompañarlo”. Se toman sólo los pacientes cuyo
+diagnóstico cae en esa categoría y se mide qué porcentaje <u>no</u> recibe esa disciplina en el centro.
+  <ul><li><b>Lenguaje y aprendizaje → sin Fonoaudiología:</b> pacientes con trastornos del habla, del lenguaje o de las
+  habilidades escolares que no tienen sesiones de Fonoaudiología.</li>
+  <li><b>Motor / neurológico → sin Kinesiología:</b> pacientes con problemas de marcha, parálisis, epilepsia, artrosis,
+  etc., que no tienen sesiones de Kinesiología.</li>
+  <li><b>Sensorial → sin Fonoaudiología:</b> pacientes con hipoacusia u otros problemas de audición o visión que no
+  tienen Fonoaudiología.</li></ul></li>
+<li><b>Cada columna</b> es quién financia al paciente: <b>Total</b> = todos los pacientes de esa categoría;
+<b>OSECAC</b> e <b>INCLUIR</b> = sólo los de esa obra social; <b>Resto</b> = todas las demás obras sociales juntas.</li>
+<li><b>Cada celda</b> muestra el porcentaje y, entre paréntesis, sobre cuántos pacientes se calculó. Por ejemplo,
+<b>{ej['%']:.1f}% ({ej['n']})</b> en la fila Motor / neurológico y columna OSECAC quiere decir que, de los {ej['n']}
+pacientes de OSECAC con diagnóstico motor o neurológico, el {ej['%']:.0f}% no recibe Kinesiología.</li>
+<li>Cuanto más alto el número, más grande la brecha. Si el número entre paréntesis es chico, el porcentaje es menos confiable.</li>
+</ul></div></div>""")
+nota("Que un paciente no reciba una disciplina en el CARI no implica que no la reciba en otro lugar.", alerta=True)
 
-CATEGORIAS = {
-    "Discapacidad intelectual": r"RETRASO MENTAL|DISCAPACIDAD (?:INTELECTUAL|MENTAL)|RETRASO MADURATIVO",
-    "Motor / neurológico": (r"MARCHA|MOVILIDAD|PLEJIA|PLEGIA|PARALISIS|EPILEP|ESCLEROSIS|PARKINSON|ATAXIA|ARTR|"
-                            r"ESCOLIOSIS|CEREBROVASCULAR|MEDULAR|COORDINACION|DISCO|FRACTURA|AMPUTACION|SILLA|"
-                            r"HIDROCEFALIA|DISTROFIA|MIOTONIC|ESPONDIL|LUMB|CIATICA|RADICULO|OSTEOPOROSIS|"
-                            r"CADERA|RODILLA|ESPINA BIFIDA|AUSENCIA CONGENITA|MALFORMACION"),
-    "Conducta y atención": r"COMPORTAMIENTO|CONDUCTA|HIPERCINETIC|ATENCION|IMPULSOS|OPOSITOR|\bTICS\b|TOURETTE",
-    "Lenguaje y aprendizaje": r"HABLA|LENGUAJE|ESCOLARES|APRENDIZAJE|DISLEXIA",
-    "Salud mental (psicosis, ánimo, personalidad)": (r"ESQUIZO|PSICOSIS|PSICOTIC|BIPOLAR|DEPRESIV|AFECTIVO|"
-                            r"PERSONALIDAD|ANSIEDAD|DEMENCIA|PARANOIDE|OBSESIV|MENTAL(?:ES)? (?:NO ESPECIFICADO )?DEBIDO"),
-    "TEA / TGD": r"AUTIS|ASPERGER|GENERALIZADOS? DEL DESARROLLO|\bTEA\b|\bTGD\b",
-    "Sensorial (audición / visión)": r"HIPOACUSIA|SORDERA|AUDI|CEGUERA|\bVISION|MACULA|OPTICA|COCLEAR|OJOS",
-    "Síndrome de Down": r"DOWN",
-    "Clínico (respiratorio, cardíaco, otros)": (r"CARDI|RESPIRA|DISNEA|APNEA|PULMON|ASMA|RENAL|LUPUS|DIABET|"
-                            r"HIPOTIROID|FALLOT|ILEOSTOMIA|CIRROSIS|HEPAT|PANCREAS|INTESTINO"),
-}
-CATS = list(CATEGORIAS)
-for cat, patron in CATEGORIAS.items():
-    df[cat] = df["dg_limpio"].str.contains(patron, regex=True)
-df["n_categorias"] = df[CATS].sum(axis=1)
 
-# Agrupamos obras sociales: las dos grandes y el resto
-df["os_grupo"] = np.where(df["Obra Social"].isin(["OSECAC", "INCLUIR"]), df["Obra Social"], "Resto")
+# ======================================================================
+# 💰 7 · Problemática 2: dependencia de pocos financiadores
+# ======================================================================
+participacion = df["Obra social"].value_counts(normalize=True) * 100
+HHI = (participacion ** 2).sum()                     # índice de Herfindahl-Hirschman
+HHI_txt = f"{HHI:,.0f}".replace(",", ".")
+top2 = participacion.iloc[:2].sum()
 
-# ---------------------------------------------------------------
-# Base limpia
-# ---------------------------------------------------------------
-def titulo(t):
-    return " ".join(p.capitalize() if p not in ("DE", "DEL", "LA", "LOS") or i == 0 else p.lower()
-                    for i, p in enumerate(t.split()))
+seccion(7, "Problemática 2: dependencia de pocos financiadores",
+        "¿Cuánto depende el centro de una o dos obras sociales?",
+        '<div style="font-size:48px;animation:pop 1s ease both">🏦</div>')
 
-def localidad(fila):
-    if fila["zona"] == "CABA sin barrio":
-        return "Capital Federal"
-    if fila["zona"] == "CABA con barrio":
-        return f"Capital Federal, {titulo(fila['barrio'])}"
-    return f"Provincia de Bs. As., {titulo(fila['barrio'])}"
+# --- Gráfico circular: OSECAC, INCLUIR y el resto -------------------------------
+reparto = df["Grupo obra social"].replace({"Resto": f"Otras {df['Obra social'].nunique() - 2} obras sociales"})
+reparto = reparto.value_counts().rename_axis("Obra social").reset_index(name="Pacientes")
+fig = px.pie(reparto, names="Obra social", values="Pacientes", hole=.45,
+             color="Obra social", color_discrete_sequence=[AZUL, CELESTE, AMBAR],
+             title=f"OSECAC + INCLUIR = {top2:.0f}% de los pacientes")
+fig.update_traces(textinfo="percent+label", textposition="outside", pull=[.06, 0, 0], sort=False,
+                  marker=dict(line=dict(color="#FFFFFF", width=3)),
+                  hovertemplate="<b>%{label}</b><br>%{value} pacientes (%{percent})<extra></extra>")
+fig.update_layout(showlegend=False,
+                  annotations=[dict(text=f"<b>{len(df)}</b><br>pacientes", showarrow=False,
+                                    font=dict(size=16, color=AZUL_NOCHE))])
+mostrar_fig(fig, 440)
 
-limpio = pd.DataFrame({
-    "ID": df["paciente_id"],
-    "Obra social": df["Obra Social"].str.strip("()").str.replace(".", "", regex=False),
-    "Grupo obra social": df["os_grupo"],
-    "Edad": df["Edad"],
-    "Grupo etario": df["grupo_etario"].astype(str),
-    "Sexo": df["Sexo"].map({"F": "Femenino", "M": "Masculino"}).fillna("Sin dato"),
-    "Localidad": df.apply(localidad, axis=1),
-    "Zona": df["zona"].replace({"CABA con barrio": "Capital Federal con barrio",
-                                "CABA sin barrio": "Capital Federal sin barrio"}),
-    "Diagnóstico": df["dg_limpio"].str.rstrip(".").str.strip(),
-    "Tratamiento": df["Tto"].map(lambda t: "; ".join(f"{c}: {n}" for c, n in re.findall(r"([A-Z0-9]+)\s*:\s*(\d+)", t))),
-})
-ses = tto_disc.pivot_table(index="paciente_id", columns="disciplina", values="sesiones", aggfunc="sum").reindex(columns=ORDEN_DISC)
-ses = ses.reindex(df["paciente_id"]).fillna(0).astype(int)
-for d in ORDEN_DISC:
-    limpio[d] = ses[d].values
-limpio["Sesiones totales"] = limpio[ORDEN_DISC].sum(axis=1)
-limpio["Cantidad de disciplinas"] = (limpio[ORDEN_DISC] > 0).sum(axis=1)
-for c in CATS:
-    limpio[c] = df[c].astype(int).values
+# --- Velocímetro animado del HHI -------------------------------------------------
+# La aguja barre desde 0 hasta el valor y después queda oscilando alrededor de él.
+angulo = -90 + 180 * HHI / 10000
+mostrar(f"""
+<style>
+.hhi{{display:flex;flex-wrap:wrap;gap:24px;align-items:center;}}
+.gauge{{flex:0 0 260px;text-align:center;}}
+.gauge .aguja{{transform-origin:130px 130px;
+   animation:barrido 2.4s cubic-bezier(.3,1.4,.5,1) both, temblor 2.6s ease-in-out 2.4s infinite;}}
+@keyframes barrido{{from{{transform:rotate(-90deg)}}to{{transform:rotate({angulo:.1f}deg)}}}}
+@keyframes temblor{{0%,100%{{transform:rotate({angulo:.1f}deg)}}30%{{transform:rotate({angulo+7:.1f}deg)}}
+   60%{{transform:rotate({angulo-5:.1f}deg)}}80%{{transform:rotate({angulo+3:.1f}deg)}}}}
+.gauge .valor{{font-weight:800;color:#0A2463;font-size:26px;margin-top:-4px;}}
+.gauge .lbl{{font-size:12px;color:#52607A;}}
+.hhi .txt{{flex:1 1 300px;}}
+</style>
+<div class="card hhi">
+ <div class="gauge"><svg viewBox="0 0 260 140" width="260" height="140">
+  <path d="M20 130 A110 110 0 0 1 240 130" fill="none" stroke="#EAF2FF" stroke-width="22"/>
+  <path d="M20 130 A110 110 0 0 1 240 130" fill="none" stroke="#8DB5F5" stroke-width="22" stroke-dasharray="86 600"/>
+  <path d="M20 130 A110 110 0 0 1 240 130" fill="none" stroke="#2456D6" stroke-width="22" stroke-dasharray="0 86 260 600"/>
+  <g class="aguja"><polygon points="125,130 130,36 135,130" fill="#0A2463"/></g>
+  <circle cx="130" cy="130" r="10" fill="#0A2463"/><circle cx="130" cy="130" r="4" fill="#fff"/>
+ </svg><div class="valor">HHI {HHI_txt}</div><div class="lbl">celeste = concentración baja/moderada · azul = alta</div></div>
+ <div class="txt">
+  <p>Para medir la concentración usamos el <b>índice de Herfindahl-Hirschman (HHI)</b>: se suma el cuadrado de la
+  participación (en %) de cada obra social. Va de 0 (pacientes muy repartidos) a 10.000 (un único financiador).
+  Según las guías de fusiones de EE. UU. de 2010, más de 2.500 es concentración alta.</p>
+  <p><span class="chip">Obras sociales distintas: <b>{df['Obra social'].nunique()}</b></span>
+  <span class="chip">Las 2 principales: <b>{top2:.0f}%</b></span>
+  <span class="chip">HHI = <b>{HHI_txt}</b> → concentración alta</span></p>
+ </div>
+</div>""")
 
-diccionario = pd.DataFrame([
-    ("ID", "Número de paciente"),
-    ("Obra social / Grupo obra social", "Financiador; el grupo separa OSECAC, INCLUIR y el resto"),
-    ("Edad / Grupo etario", "Edad en años y su rango (0-12, 13-17, 18-29, 30-44, 45-64, 65+)"),
-    ("Sexo", "Femenino, Masculino o Sin dato"),
-    ("Localidad", "Formato estándar: 'Capital Federal, Barrio' o 'Provincia de Bs. As., Localidad'. "
-                  "'Capital Federal' solo = no se cargó el barrio"),
-    ("Zona", "Capital Federal con barrio, Capital Federal sin barrio o Provincia de Bs. As."),
-    ("Diagnóstico", "Texto del diagnóstico con errores de tipeo corregidos"),
-    ("Tratamiento", "Códigos estandarizados: PSC=Psicología, PSP=Psicopedagogía, PSM=Psicomotricidad, "
-                    "FOC/FON=Fonoaudiología, TOC/TOZ=Terapia ocupacional, KNC/KIN/K30=Kinesiología; número = sesiones"),
-    (", ".join(ORDEN_DISC), "Sesiones indicadas de cada disciplina (0 = no la recibe)"),
-    ("Sesiones totales / Cantidad de disciplinas", "Suma de sesiones y cantidad de disciplinas distintas"),
-    (", ".join(CATS), "Categoría diagnóstica: 1 = el diagnóstico la incluye, 0 = no (un paciente puede tener varias)"),
-], columns=["Columna", "Descripción"])
+# --- Tabla: ¿todos los financiadores cubren lo mismo? -----------------------------
+t = df.groupby("Grupo obra social").agg(
+    Pacientes=("ID", "count"), **{"Edad mediana": ("Edad", "median"),
+    "Sesiones promedio": ("Sesiones totales", "mean"), "Disciplinas promedio": ("Cantidad de disciplinas", "mean"),
+    "Sesiones totales": ("Sesiones totales", "sum")})
+t["% pacientes"] = t["Pacientes"] / t["Pacientes"].sum() * 100
+t["% sesiones del centro"] = t["Sesiones totales"] / t["Sesiones totales"].sum() * 100
+t = t.reindex(["OSECAC", "INCLUIR", "Resto"]).round(1)
+t.index.name = None
+o = t.loc["OSECAC"]
+mostrar(f"""<div class="card"><b>¿Todos los financiadores cubren lo mismo?</b>{tabla(t, 1)}
+<div class="leer"><h4>Cómo leer esta tabla</h4><ul>
+<li><b>Cada fila</b> es un grupo de financiadores: <b>OSECAC</b>, <b>INCLUIR</b> y <b>Resto</b> (las demás obras sociales
+juntas). Todos los números de una fila se calculan sólo con los pacientes de ese grupo.</li>
+<li><b>Pacientes:</b> cuántos pacientes financia ese grupo (OSECAC: {o['Pacientes']:.0f}).</li>
+<li><b>Edad mediana:</b> la edad que deja a la mitad de sus pacientes por debajo y a la mitad por encima. Los de OSECAC
+son bastante mayores ({o['Edad mediana']:.0f} años).</li>
+<li><b>Sesiones promedio:</b> cuántas sesiones tiene indicadas, en promedio, cada paciente sumando todas sus disciplinas.
+Un paciente de OSECAC tiene {o['Sesiones promedio']:.1f}; uno de INCLUIR, {t.loc['INCLUIR','Sesiones promedio']:.1f}.</li>
+<li><b>Disciplinas promedio:</b> cuántas disciplinas distintas recibe en promedio cada paciente (por ejemplo,
+Psicología + Fonoaudiología = 2).</li>
+<li><b>Sesiones totales:</b> la suma de todas las sesiones indicadas a los pacientes de ese grupo.</li>
+<li><b>% pacientes</b> y <b>% sesiones del centro:</b> qué parte del total de pacientes y del total de sesiones del CARI
+corresponde a ese grupo. Si las dos columnas fueran parecidas, cada financiador “usaría” el centro en proporción a sus
+pacientes. En OSECAC no pasa: tiene el {o['% pacientes']:.0f}% de los pacientes pero sólo el {o['% sesiones del centro']:.0f}% de las sesiones.</li>
+</ul></div></div>""")
 
-with pd.ExcelWriter("CARI_limpio.xlsx") as w:
-    limpio.to_excel(w, sheet_name="Pacientes", index=False)
-    diccionario.to_excel(w, sheet_name="Diccionario", index=False)
-print(limpio.shape)
-print(limpio.head(3).T)
-print(limpio["Localidad"].value_counts().head(8))
+# --- A igual edad, ¿quién recibe más sesiones? ------------------------------------
+por_edad = (df.groupby(["Grupo etario", "Grupo obra social"], observed=False)
+            .agg(Sesiones=("Sesiones totales", "mean"), n=("ID", "count")).reset_index())
+por_edad = por_edad[por_edad["n"] >= 5]           # evitamos promedios con muy pocos casos
+fig = px.bar(por_edad, x="Grupo etario", y="Sesiones", color="Grupo obra social", barmode="group",
+             color_discrete_map=COLOR_OS, category_orders={"Grupo obra social": ["OSECAC", "INCLUIR", "Resto"]},
+             text=por_edad["Sesiones"].map(lambda v: f"{v:.1f}"), custom_data=["n"],
+             labels={"Sesiones": "Sesiones promedio por paciente", "Grupo obra social": "Obra social"},
+             title="A igual edad, los pacientes de OSECAC reciben menos sesiones")
+fig.update_traces(textposition="outside", cliponaxis=False,
+                  hovertemplate="Grupo %{x}<br>%{y:.2f} sesiones promedio<br>%{customdata[0]} pacientes<extra></extra>")
+mostrar_fig(fig, 460)
+nota("Comparando dentro del mismo grupo etario, la diferencia se mantiene y crece con la edad. Es una <b>hipótesis "
+     "fuerte de restricción de cobertura</b> (topes o autorizaciones), aunque para confirmarla habría que comparar lo "
+     "indicado contra lo autorizado.", alerta=True)
+
+
+# ======================================================================
+# 📍 8 · Territorio
+# ======================================================================
+pines = "".join(f'<span class="pin" style="left:{x}px;top:{y}px;animation-delay:{d}s">📍</span>'
+                for x, y, d in [(14, 22, 0), (46, 8, .5), (70, 30, 1), (30, 44, 1.5), (86, 6, 2)])
+seccion(8, "Territorio", "¿De dónde vienen los pacientes?", f"""
+<style>
+.mapa{{position:relative;width:118px;height:74px;border-radius:12px;background:
+     linear-gradient(#EAF2FF 1px,transparent 1px) 0 0/14px 14px,linear-gradient(90deg,#EAF2FF 1px,transparent 1px) 0 0/14px 14px,#fff;
+     border:2px solid #D6E3FA;overflow:hidden;}}
+.mapa .rio{{position:absolute;right:-10px;top:-10px;width:44px;height:100px;background:#C9DCFB;border-radius:40%;transform:rotate(18deg);}}
+.pin{{position:absolute;font-size:18px;animation:caerpin 2.5s cubic-bezier(.3,1.5,.5,1) infinite;}}
+@keyframes caerpin{{0%{{transform:translateY(-40px);opacity:0}}25%,80%{{transform:none;opacity:1}}100%{{opacity:0}}}}
+</style>
+<div class="mapa"><div class="rio"></div>{pines}</div>""")
+
+# La localidad tiene el formato "Capital Federal, Barrio": nos quedamos con lo que va después de la coma
+df["Barrio"] = df["Localidad"].str.split(", ").str[1].fillna("Sin barrio cargado")
+arbol = df.groupby(["Zona", "Barrio"]).size().reset_index(name="Pacientes")
+fig = px.treemap(arbol, path=[px.Constant("Todos los pacientes"), "Zona", "Barrio"], values="Pacientes",
+                 color="Zona", color_discrete_map={"Capital Federal con barrio": AZUL, "Capital Federal sin barrio": GRIS,
+                                                   "Provincia de Bs. As.": CELESTE, "(?)": AZUL_PALIDO},
+                 title="Pacientes por zona y barrio (hacé clic en una zona para entrar)")
+fig.update_traces(marker=dict(line=dict(color="#FFFFFF", width=2)), root_color=AZUL_PALIDO,
+                  hovertemplate="<b>%{label}</b><br>%{value} pacientes<extra></extra>")
+mostrar_fig(fig, 540)
+
+pct_prov = df["Zona"].eq("Provincia de Bs. As.").mean() * 100
+top_caba = df.loc[df["Zona"] == "Capital Federal con barrio", "Barrio"].value_counts().index[:3]
+top_prov = df.loc[df["Zona"] == "Provincia de Bs. As.", "Barrio"].value_counts().index[:3]
+nota(f"Alrededor del <b>{pct_prov:.0f}%</b> de los pacientes viene de la Provincia de Buenos Aires (sobre todo "
+     f"{', '.join(top_prov[:-1])} y {top_prov[-1]}). En Capital, los barrios con más pacientes son "
+     f"{', '.join(top_caba[:-1])} y {top_caba[-1]}. Un {df['Zona'].eq('Capital Federal sin barrio').mean()*100:.0f}% "
+     "figura sólo como “Capital Federal”, sin barrio.")
+
+
+# ======================================================================
+# 📊 9 · Indicadores clave
+# ======================================================================
+KPIS = [
+    ("👥", "Pacientes", len(df), 0, ""),
+    ("🎂", "Edad mediana", df["Edad"].median(), 0, " años"),
+    ("🧒", "Menores de 18", (df["Edad"] < 18).mean() * 100, 1, "%"),
+    ("🧠", "Con Psicología", (df["Psicología"] > 0).mean() * 100, 1, "%"),
+    ("1️⃣", "Con una sola disciplina", (df["Cantidad de disciplinas"] == 1).mean() * 100, 1, "%"),
+    ("🏦", "OSECAC + INCLUIR", top2, 1, "%"),
+    ("📈", "HHI obras sociales", HHI, 0, ""),
+    ("🚌", "De Provincia de Bs. As.", pct_prov, 1, "%"),
+]
+tarjetas = "".join(
+    f'<div class="kpi" style="animation-delay:{i*0.12:.2f}s"><div class="ico">{ico}</div>'
+    f'<div class="cifra" data-valor="{valor:.4f}" data-dec="{dec}" data-suf="{suf}">0</div>'
+    f'<div class="lbl">{nombre}</div></div>'
+    for i, (ico, nombre, valor, dec, suf) in enumerate(KPIS))
+
+seccion(9, "Indicadores clave", "El resumen del análisis en ocho números",
+        '<div style="font-size:46px;animation:bombeo 1.4s ease-in-out infinite">📊</div>'
+        '<style>@keyframes bombeo{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}</style>')
+
+mostrar(f"""
+<style>
+.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:12px 0;}}
+.kpi{{background:#fff;border:1px solid #D6E3FA;border-radius:18px;padding:18px;text-align:center;position:relative;
+     overflow:hidden;box-shadow:0 8px 20px rgba(36,86,214,.08);animation:pop .7s ease both;}}
+.kpi:before{{content:"";position:absolute;left:0;right:0;top:0;height:5px;background:linear-gradient(90deg,#2456D6,#17A2C8);}}
+.kpi:hover{{transform:translateY(-4px);box-shadow:0 14px 26px rgba(36,86,214,.16);transition:.25s;}}
+.kpi .ico{{font-size:26px;}}
+.kpi .cifra{{font-size:32px;font-weight:800;color:#0A2463;line-height:1.2;}}
+.kpi .lbl{{font-size:13.5px;color:#52607A;}}
+</style>
+<div class="kpis">{tarjetas}</div>
+<script>
+document.querySelectorAll('.cifra').forEach(function(el){{
+  var fin=parseFloat(el.dataset.valor), dec=parseInt(el.dataset.dec), suf=el.dataset.suf, t0=null, dur=1800;
+  function paso(t){{ if(!t0) t0=t; var p=Math.min((t-t0)/dur,1), e=1-Math.pow(1-p,3);
+    el.textContent=(fin*e).toLocaleString('es-AR',{{minimumFractionDigits:dec,maximumFractionDigits:dec}})+suf;
+    if(p<1) requestAnimationFrame(paso); }}
+  requestAnimationFrame(paso);
+}});
+</script>""")
+
+
+# ======================================================================
+# ✅ 10 · Conclusiones: problemáticas y soluciones propuestas
+# ======================================================================
+def brecha_de(prefijo, obra_social):
+    fila = brecha[brecha["Par"].str.startswith(prefijo) & brecha["Obra social"].eq(obra_social)]
+    return fila["%"].iloc[0]
+
+osecac_kine = brecha_de("Motor", "OSECAC")
+total_kine  = brecha_de("Motor", "Total")
+sens_fono   = brecha_de("Sensorial", "Total")
+leng_fono   = brecha_de("Lenguaje", "Total")
+pct_psico_pac = (df["Psicología"] > 0).mean() * 100
+pct_psico_ses = df["Psicología"].sum() / df["Sesiones totales"].sum() * 100
+
+PROBLEMAS = [
+    ("🌉", "Brecha diagnóstico–tratamiento",
+     f"El {total_kine:.0f}% de los pacientes con diagnóstico motor/neurológico no recibe Kinesiología "
+     f"(en OSECAC, el {osecac_kine:.0f}%). El {sens_fono:.0f}% de los pacientes con diagnóstico sensorial y el "
+     f"{leng_fono:.0f}% con trastornos de lenguaje no reciben Fonoaudiología.",
+     ["Revisar con OSECAC los topes y autorizaciones por disciplina.",
+      "Protocolo de admisión que sugiera disciplinas según el diagnóstico.",
+      "Auditar los casos de “sólo Psicología” en mayores de 30 años."]),
+    ("🏦", "Concentración de financiamiento",
+     f"OSECAC + INCLUIR = {top2:.0f}% de los pacientes; HHI ≈ {HHI_txt} (concentración alta). Un cambio en el "
+     "convenio con OSECAC afecta a casi dos tercios del centro.",
+     ["Diversificar convenios con las obras sociales que hoy derivan pocos pacientes.",
+      "Seguir el HHI como indicador trimestral.",
+      "Usar los datos de intensidad de tratamiento para negociar valores con OSECAC."]),
+    ("🧠", "Sobrecarga en Psicología",
+     f"El {pct_psico_pac:.0f}% de los pacientes y el {pct_psico_ses:.0f}% de las sesiones pasan por Psicología.",
+     ["Dimensionar el equipo según las sesiones semanales de cada disciplina.",
+      "Evaluar si parte de la demanda adulta se beneficiaría de terapia ocupacional o kinesiología."]),
+]
+tarjetas = "".join(f"""
+<div class="flip" style="animation-delay:{i*0.15:.2f}s"><div class="flip-in">
+  <div class="cara frente"><div class="ico">{ico}</div><div class="n">Problemática {i+1}</div>
+     <h3>{titulo}</h3><p>{dato}</p><div class="hint">Pasá el mouse para ver la propuesta ↻</div></div>
+  <div class="cara dorso"><div class="n">Propuestas</div><h3>{titulo}</h3>
+     <ul>{"".join(f"<li>{p}</li>" for p in props)}</ul></div>
+</div></div>""" for i, (ico, titulo, dato, props) in enumerate(PROBLEMAS))
+
+seccion(10, "Conclusiones: problemáticas y soluciones propuestas", "Qué encontramos y qué proponemos hacer",
+        '<div style="font-size:46px;animation:pop 1s ease both">✅</div>')
+
+mostrar(f"""
+<style>
+.flips{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:14px 0;}}
+.flip{{perspective:1200px;height:330px;animation:subir .8s ease both;}}
+.flip-in{{position:relative;width:100%;height:100%;transition:transform .8s;transform-style:preserve-3d;}}
+.flip:hover .flip-in{{transform:rotateY(180deg);}}
+.cara{{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;border-radius:18px;
+      padding:20px;box-shadow:0 10px 24px rgba(10,36,99,.12);overflow:auto;}}
+.frente{{background:#fff;border:1px solid #D6E3FA;}}
+.dorso{{background:linear-gradient(150deg,#0A2463,#2456D6);color:#fff;transform:rotateY(180deg);}}
+.cara .ico{{font-size:34px;}}
+.cara .n{{font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:#17A2C8;font-weight:700;}}
+.dorso .n{{color:#BFE9F5;}}
+.cara h3{{margin:4px 0 8px;font-size:19px;color:#0A2463;}}
+.dorso h3{{color:#fff;}}
+.cara p{{font-size:14px;color:#33415C;}}
+.dorso ul{{padding-left:18px;margin:6px 0;font-size:14px;}} .dorso li{{margin-bottom:6px;}}
+.hint{{margin-top:10px;font-size:12px;color:#2456D6;font-weight:600;animation:parpadeo 2s infinite;}}
+@keyframes parpadeo{{50%{{opacity:.35}}}}
+.olas{{position:relative;height:120px;border-radius:22px;overflow:hidden;margin-top:26px;
+      background:linear-gradient(135deg,#0A2463,#2456D6);color:#fff;display:flex;align-items:center;justify-content:center;
+      font-weight:700;font-size:20px;}}
+.olas .pista{{position:absolute;bottom:0;left:0;width:200%;height:60px;display:flex;animation:ola 8s linear infinite;}}
+.olas .pista svg{{width:50%;height:60px;display:block;}}
+.olas .p2{{animation-duration:12s;}}
+@keyframes ola{{to{{transform:translateX(-50%)}}}}
+.olas span{{position:relative;z-index:2;}}
+</style>
+<div class="card suave"><b>Problemática central.</b> El centro depende fuertemente de un solo financiador (OSECAC)
+y, justamente en esos pacientes, los tratamientos son menos intensos y menos interdisciplinarios de lo que sus
+diagnósticos sugerirían.</div>
+<div class="flips">{tarjetas}</div>
+<div class="nota"><b>Recomendación: estandarizar la carga de datos.</b> Para que el centro pueda seguir
+estos indicadores, conviene cargar siempre la localidad con un mismo formato, por ejemplo <code>Capital Federal, Barrio</code>
+(y no CABA, CAPITAL o CAP. FED. según quién la escriba), elegir el barrio de una lista desplegable y registrar el
+diagnóstico con su código CIE-10.</div>
+<div class="nota alerta"><b>Limitaciones.</b> Es una foto en un momento (no hay fechas), las categorías diagnósticas
+se armaron por palabras clave y los códigos de tratamiento se interpretaron sin confirmación del centro. Que un
+paciente no reciba una disciplina en el CARI no implica que no la reciba en otro lugar.</div>
+<div class="olas"><span>💙 ¡Gracias! · {GRUPO}</span>
+  <div class="pista"><svg viewBox="0 0 1200 60" preserveAspectRatio="none"><path fill="rgba(255,255,255,.25)" d="M0 30 Q75 4 150 30 T300 30 T450 30 T600 30 T750 30 T900 30 T1050 30 T1200 30 V60 H0Z"/></svg><svg viewBox="0 0 1200 60" preserveAspectRatio="none"><path fill="rgba(255,255,255,.25)" d="M0 30 Q75 4 150 30 T300 30 T450 30 T600 30 T750 30 T900 30 T1050 30 T1200 30 V60 H0Z"/></svg></div>
+  <div class="pista p2"><svg viewBox="0 0 1200 60" preserveAspectRatio="none"><path fill="rgba(255,255,255,.35)" d="M0 36 Q75 10 150 36 T300 36 T450 36 T600 36 T750 36 T900 36 T1050 36 T1200 36 V60 H0Z"/></svg><svg viewBox="0 0 1200 60" preserveAspectRatio="none"><path fill="rgba(255,255,255,.35)" d="M0 36 Q75 10 150 36 T300 36 T450 36 T600 36 T750 36 T900 36 T1050 36 T1200 36 V60 H0Z"/></svg></div>
+</div>
+""")
+
